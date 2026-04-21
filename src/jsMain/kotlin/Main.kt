@@ -516,7 +516,7 @@ private fun drawRadiusCircle(c: LngLat, radiusKm: Double) {
 private fun setupMapClick(onClick: (lat: Double, lon: Double) -> Unit) {
     val map = window.asDynamic().__rf_map ?: return
     map.on("click") { e ->
-        val dynamicEvent = e.asDynamic()
+        val dynamicEvent = e.unsafeCast<dynamic>()
         onClick((dynamicEvent.latlng.lat as Number).toDouble(), (dynamicEvent.latlng.lng as Number).toDouble())
     }
 }
@@ -530,12 +530,12 @@ private fun hookFileLoader(onLoaded: (name: String, bytes: dynamic) -> Unit) {
     })
 }
 
-private fun Double.format(digits: Int): String = asDynamic().toFixed(digits) as String
+private fun Double.format(digits: Int): String = unsafeCast<dynamic>().toFixed(digits) as String
 
 private fun Double.toRadians(): Double = this * PI / 180.0
 
 private fun Any.inputValueOrNull(): Double? =
-    (asDynamic().target as? HTMLInputElement)?.value?.toDoubleOrNull()
+    (unsafeCast<dynamic>().target as? HTMLInputElement)?.value?.toDoubleOrNull()
 
 fun main() {
     renderComposable(rootElementId = "root") {
