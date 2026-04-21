@@ -3,6 +3,7 @@
 import androidx.compose.runtime.*
 import kotlinx.browser.document
 import kotlinx.browser.window
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.await
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.web.attributes.InputType
@@ -14,6 +15,7 @@ import org.jetbrains.compose.web.renderComposable
 import org.w3c.dom.CanvasRenderingContext2D
 import org.w3c.dom.HTMLCanvasElement
 import org.w3c.dom.HTMLInputElement
+import kotlin.js.Promise
 import kotlin.math.*
 
 external object GeoTIFF {
@@ -50,6 +52,9 @@ fun App() {
     var center by remember { mutableStateOf<LngLat?>(null) }
     var radiusKm by remember { mutableStateOf(12.0) }
     var mastHeight by remember { mutableStateOf(30.0) }
+    var isBusy by remember { mutableStateOf(false) }
+    var statusMessage by remember { mutableStateOf("Очікування завантаження GeoTIFF.") }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
 
     val thresholds = remember {
         mutableStateListOf(
@@ -113,6 +118,23 @@ fun App() {
                     }
                 }) { Text("Ініціалізація карти...") }
             }
+
+            if (isBusy) {
+                Div({
+                    style {
+                        position(Position.Absolute)
+                        top(16.px)
+                        left(16.px)
+                        padding(12.px)
+                        borderRadius(8.px)
+                        backgroundColor(Color.white)
+                        property("box-shadow", "0 2px 10px rgba(0,0,0,0.12)")
+                        maxWidth(320.px)
+                    }
+                }) {
+                    Text(statusMessage)
+                }
+            }
         }
     }
 
@@ -126,8 +148,12 @@ fun App() {
     LaunchedEffect(center, raster, radiusKm, mastHeight, thresholds.toList()) {
         val r = raster ?: return@LaunchedEffect
         val c = center ?: return@LaunchedEffect
+        isBusy = true
+        statusMessage = "Розрахунок зони покриття..."
         drawCoverage(r, c, radiusKm, mastHeight, thresholds)
         updateCenterMarker(c)
+        statusMessage = "Розрахунок завершено."
+        isBusy = false
     }
 
     DisposableEffect(Unit) {
@@ -144,7 +170,22 @@ fun App() {
         hookFileLoader { name, bytes ->
             if (!name.endsWith(".tif") && !name.endsWith(".tiff")) return@hookFileLoader
             scope.launch {
-                raster = parseGeoTiff(bytes)
+                isBusy = true
+                errorMessage = null
+                statusMessage = "Завантаження файлу $name..."
+                try {
+                    statusMessage = "Парсинг GeoTIFF..."
+                    raster = parseGeoTiff(bytes)
+                    statusMessage = "GeoTIFF успішно завантажено."
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    val msg = t.message ?: "Невідома помилка."
+                    errorMessage = msg
+                    statusMessage = "Помилка: $msg"
+                } finally {
+                    isBusy = false
+                }
             }
         }
         onDispose { }
@@ -186,6 +227,19 @@ private fun SettingsPanel(
                     window.dispatchEvent(js("new Event('rf-file-loaded')"))
                 }
                 reader.readAsArrayBuffer(file)
+            }
+        }
+        if (errorMessage != null) {
+            P({
+                style {
+                    color(Color.red)
+                    fontWeight("600")
+                }
+            }) { Text("Помилка: $errorMessage") }
+        } else {
+            P {
+                style { color(rgb(90, 95, 104)) }
+                Text(statusMessage)
             }
         }
 
@@ -235,12 +289,12 @@ private fun SettingsPanel(
 }
 
 private suspend fun parseGeoTiff(bytes: dynamic): RasterData {
-    val tiff = GeoTIFF.fromArrayBuffer(bytes).await()
-    val image = tiff.getImage(0)
+    val tiff = awaitIfPromise(GeoTIFF.fromArrayBuffer(bytes))
+    val image = awaitIfPromise(tiff.getImage(0))
     val width = image.getWidth() as Int
     val height = image.getHeight() as Int
     val bbox = image.getBoundingBox()
-    val arr = image.readRasters(js("({ interleave: true })"))
+    val arr = awaitIfPromise(image.readRasters(js("({ interleave: true })")))
 
     val values = FloatArray(width * height)
     for (i in values.indices) values[i] = (arr[i] as Number).toFloat()
@@ -254,6 +308,16 @@ private suspend fun parseGeoTiff(bytes: dynamic): RasterData {
         maxLon = (bbox[2] as Number).toDouble(),
         maxLat = (bbox[3] as Number).toDouble(),
     )
+}
+
+private suspend fun awaitIfPromise(value: dynamic): dynamic {
+    if (value == null || value == undefined) return value
+    val then = value.then
+    return if (jsTypeOf(then) == "function") {
+        (value as Promise<dynamic>).await()
+    } else {
+        value
+    }
 }
 
 private fun valueAt(r: RasterData, lat: Double, lon: Double): Double {
