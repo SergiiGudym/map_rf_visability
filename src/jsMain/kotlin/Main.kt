@@ -9,6 +9,7 @@ import org.jetbrains.compose.web.attributes.placeholder
 import org.jetbrains.compose.web.css.*
 import org.jetbrains.compose.web.dom.*
 import org.jetbrains.compose.web.renderComposable
+import org.w3c.dom.CanvasRenderingContext2D
 import org.w3c.dom.HTMLCanvasElement
 import org.w3c.dom.HTMLInputElement
 import kotlin.math.*
@@ -161,7 +162,7 @@ private fun SettingsPanel(
             minWidth(300.px)
             padding(16.px)
             backgroundColor(Color.white)
-            borderRight(1.px, LineStyle.Solid, rgb(230, 232, 235))
+            property("border-right", "1px solid rgb(230, 232, 235)")
             overflowY("auto")
         }
     }) {
@@ -191,14 +192,14 @@ private fun SettingsPanel(
         Label { Text("Радіус, км") }
         Input(InputType.Number) {
             value(radiusKm.toString())
-            onInput { onRadiusChange(it.value?.toDoubleOrNull() ?: radiusKm) }
+            onInput { event -> onRadiusChange(event.inputValueOrNull() ?: radiusKm) }
         }
 
         Br(); Br()
         Label { Text("Висота обладнання (центр), м") }
         Input(InputType.Number) {
             value(mastHeight.toString())
-            onInput { onMastHeightChange(it.value?.toDoubleOrNull() ?: mastHeight) }
+            onInput { event -> onMastHeightChange(event.inputValueOrNull() ?: mastHeight) }
         }
 
         Hr()
@@ -208,11 +209,11 @@ private fun SettingsPanel(
                 Small { Text(t.label) }
                 Input(InputType.Number) {
                     value(t.limit.toString())
-                    onInput { onThresholdChange(idx, it.value?.toDoubleOrNull() ?: t.limit, t.opacity) }
+                    onInput { event -> onThresholdChange(idx, event.inputValueOrNull() ?: t.limit, t.opacity) }
                 }
                 Input(InputType.Number) {
                     value(t.opacity.toString())
-                    onInput { onThresholdChange(idx, t.limit, it.value?.toDoubleOrNull() ?: t.opacity) }
+                    onInput { event -> onThresholdChange(idx, t.limit, event.inputValueOrNull() ?: t.opacity) }
                     placeholder("opacity 0..1")
                 }
                 Div({
@@ -272,15 +273,15 @@ private fun drawCoverage(r: RasterData, center: LngLat, radiusKm: Double, mastHe
         c.style.position = "absolute"
         c.style.top = "0"
         c.style.left = "0"
-        c.style.pointerEvents = "none"
+        c.style.setProperty("pointer-events", "none")
         c.width = 1400
         c.height = 1000
         document.getElementById("map")!!.appendChild(c)
         c
     }
 
-    val ctx = canvas.getContext("2d") as dynamic
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    val ctx = canvas.getContext("2d") as? CanvasRenderingContext2D ?: return
+    ctx.clearRect(0.0, 0.0, canvas.width.toDouble(), canvas.height.toDouble())
 
     val step = max(1, min(r.width, r.height) / 150)
     for (yy in 0 until r.height step step) {
@@ -293,19 +294,19 @@ private fun drawCoverage(r: RasterData, center: LngLat, radiusKm: Double, mastHe
             val needed = max(0.0, valueAt(r, lat, lon) - mastHeight)
             val (color, alpha) = colorFor(needed, thresholds)
 
-            val point = map.latLngToContainerPoint(js("[lat, lon]"))
+            val point = map.latLngToContainerPoint(arrayOf(lat, lon))
             ctx.fillStyle = color
             ctx.globalAlpha = alpha
-            ctx.fillRect((point.x as Number).toDouble(), (point.y as Number).toDouble(), 5, 5)
+            ctx.fillRect((point.x as Number).toDouble(), (point.y as Number).toDouble(), 5.0, 5.0)
         }
     }
     ctx.globalAlpha = 1.0
 }
 
 private fun haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-    val dLat = Math.toRadians(lat2 - lat1)
-    val dLon = Math.toRadians(lon2 - lon1)
-    val a = sin(dLat / 2).pow(2) + cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLon / 2).pow(2)
+    val dLat = (lat2 - lat1).toRadians()
+    val dLon = (lon2 - lon1).toRadians()
+    val a = sin(dLat / 2).pow(2) + cos(lat1.toRadians()) * cos(lat2.toRadians()) * sin(dLon / 2).pow(2)
     return 2 * 6371 * asin(sqrt(a))
 }
 
@@ -318,7 +319,7 @@ private fun initMap(onReady: () -> Unit) {
         js("({ maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' })")
     ).addTo(map)
 
-    map.setView(js("[50.4501, 30.5234]"), 8)
+    map.setView(arrayOf(50.4501, 30.5234), 8)
     onReady()
 }
 
@@ -326,7 +327,7 @@ private fun drawRasterBounds(r: RasterData) {
     val map = window.asDynamic().__rf_map ?: return
     window.asDynamic().__rf_bounds_layer?.remove()
     val layer = L.rectangle(
-        js("[[${r.minLat}, ${r.minLon}], [${r.maxLat}, ${r.maxLon}]]"),
+        arrayOf(arrayOf(r.minLat, r.minLon), arrayOf(r.maxLat, r.maxLon)),
         js("({ color: '#ff8800', weight: 2, fill: false })")
     )
     layer.addTo(map)
@@ -335,21 +336,22 @@ private fun drawRasterBounds(r: RasterData) {
 
 private fun fitToRaster(r: RasterData) {
     val map = window.asDynamic().__rf_map ?: return
-    map.fitBounds(js("[[${r.minLat}, ${r.minLon}], [${r.maxLat}, ${r.maxLon}]]"))
+    map.fitBounds(arrayOf(arrayOf(r.minLat, r.minLon), arrayOf(r.maxLat, r.maxLon)))
 }
 
 private fun updateCenterMarker(c: LngLat) {
     val map = window.asDynamic().__rf_map ?: return
     window.asDynamic().__rf_center?.remove()
-    val marker = L.circleMarker(js("[${c.lat}, ${c.lon}]"), js("({radius: 7, color: '#000', fillColor:'#ffd400', fillOpacity:0.9})"))
+    val marker = L.circleMarker(arrayOf(c.lat, c.lon), js("({radius: 7, color: '#000', fillColor:'#ffd400', fillOpacity:0.9})"))
     marker.addTo(map)
     window.asDynamic().__rf_center = marker
 }
 
 private fun setupMapClick(onClick: (lat: Double, lon: Double) -> Unit) {
     val map = window.asDynamic().__rf_map ?: return
-    map.on("click") { e: dynamic ->
-        onClick((e.latlng.lat as Number).toDouble(), (e.latlng.lng as Number).toDouble())
+    map.on("click") { e ->
+        val dynamicEvent = e.asDynamic()
+        onClick((dynamicEvent.latlng.lat as Number).toDouble(), (dynamicEvent.latlng.lng as Number).toDouble())
     }
 }
 
@@ -363,6 +365,11 @@ private fun hookFileLoader(onLoaded: (name: String, bytes: dynamic) -> Unit) {
 }
 
 private fun Double.format(digits: Int): String = asDynamic().toFixed(digits) as String
+
+private fun Double.toRadians(): Double = this * PI / 180.0
+
+private fun Any.inputValueOrNull(): Double? =
+    (asDynamic().target as? HTMLInputElement)?.value?.toDoubleOrNull()
 
 fun main() {
     renderComposable(rootElementId = "root") {
