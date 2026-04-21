@@ -84,6 +84,8 @@ fun App() {
             radiusKm = radiusKm,
             mastHeight = mastHeight,
             thresholds = thresholds,
+            statusMessage = statusMessage,
+            errorMessage = errorMessage,
             onRadiusChange = { radiusKm = it },
             onMastHeightChange = { mastHeight = it },
             onThresholdChange = { index, limit, opacity ->
@@ -198,6 +200,8 @@ private fun SettingsPanel(
     radiusKm: Double,
     mastHeight: Double,
     thresholds: List<Threshold>,
+    statusMessage: String,
+    errorMessage: String?,
     onRadiusChange: (Double) -> Unit,
     onMastHeightChange: (Double) -> Unit,
     onThresholdChange: (index: Int, limit: Double, opacity: Double) -> Unit,
@@ -237,8 +241,9 @@ private fun SettingsPanel(
                 }
             }) { Text("Помилка: $errorMessage") }
         } else {
-            P {
+            P({
                 style { color(rgb(90, 95, 104)) }
+            }) {
                 Text(statusMessage)
             }
         }
