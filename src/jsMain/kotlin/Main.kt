@@ -303,7 +303,7 @@ private fun SettingsPanel(
             P { Text("lon=${center.lon.format(6)}") }
             Button(attrs = {
                 onClick { onRecalculate() }
-                if (isBusy) disabled()
+                if (isBusy) attr("disabled", "true")
             }) {
                 Text(if (isBusy) "Розрахунок..." else "Перерахувати")
             }
@@ -499,9 +499,15 @@ private fun updateCenterMarker(c: LngLat) {
 private fun drawRadiusCircle(c: LngLat, radiusKm: Double) {
     val map = window.asDynamic().__rf_map ?: return
     window.asDynamic().__rf_radius_circle?.remove()
+    val options = js("({})")
+    options.radius = radiusKm * 1000.0
+    options.color = "#1e74ff"
+    options.weight = 2
+    options.fill = false
+    options.dashArray = "8 6"
     val circle = L.circle(
         arrayOf(c.lat, c.lon),
-        js("({ radius: ${radiusKm * 1000.0}, color: '#1e74ff', weight: 2, fill: false, dashArray: '8 6' })")
+        options
     )
     circle.addTo(map)
     window.asDynamic().__rf_radius_circle = circle
