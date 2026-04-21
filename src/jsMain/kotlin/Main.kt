@@ -57,6 +57,7 @@ fun App() {
     var isBusy by remember { mutableStateOf(false) }
     var progressPercent by remember { mutableStateOf(0) }
     var statusMessage by remember { mutableStateOf("Очікування завантаження GeoTIFF.") }
+    var calcDurationSec by remember { mutableStateOf<Double?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var mapClickBound by remember { mutableStateOf(false) }
 
@@ -92,6 +93,7 @@ fun App() {
             errorMessage = errorMessage,
             isBusy = isBusy,
             progressPercent = progressPercent,
+            calcDurationSec = calcDurationSec,
             onRadiusChange = { radiusKm = it },
             onMastHeightChange = { mastHeight = it },
             onRecalculate = {
@@ -100,7 +102,9 @@ fun App() {
                 scope.launch {
                     isBusy = true
                     progressPercent = 0
+                    calcDurationSec = null
                     statusMessage = "Розрахунок зони покриття..."
+                    val startedAt = window.performance.now()
                     drawCoverage(
                         r = r,
                         center = c,
@@ -109,8 +113,9 @@ fun App() {
                         thresholds = thresholds,
                         onProgress = { progressPercent = it }
                     )
+                    calcDurationSec = ((window.performance.now() - startedAt) / 1000.0)
                     updateCenterMarker(c)
-                    statusMessage = "Розрахунок завершено."
+                    statusMessage = "Розрахунок завершено за ${calcDurationSec?.format(2) ?: "?"} с."
                     isBusy = false
                 }
             },
@@ -249,6 +254,7 @@ private fun SettingsPanel(
     errorMessage: String?,
     isBusy: Boolean,
     progressPercent: Int,
+    calcDurationSec: Double?,
     onRadiusChange: (Double) -> Unit,
     onMastHeightChange: (Double) -> Unit,
     onRecalculate: () -> Unit,
@@ -341,6 +347,8 @@ private fun SettingsPanel(
             }
             if (isBusy) {
                 P { Text("Прогрес: $progressPercent%") }
+            } else if (calcDurationSec != null) {
+                P { Text("Останній перерахунок: ${calcDurationSec!!.format(2)} с") }
             }
         } else {
             P { Text("Натисніть в межах контуру") }
@@ -462,27 +470,18 @@ private suspend fun drawCoverage(
     val map = window.asDynamic().__rf_map
     if (map == undefined || map == null) return
 
-    val canvas = document.getElementById("coverageCanvas") as? HTMLCanvasElement ?: run {
-        val c = document.createElement("canvas") as HTMLCanvasElement
-        c.id = "coverageCanvas"
-        c.style.position = "absolute"
-        c.style.top = "0"
-        c.style.left = "0"
-        c.style.setProperty("pointer-events", "none")
-        c.width = 1400
-        c.height = 1000
-        document.getElementById("map")!!.appendChild(c)
-        c
-    }
+    window.asDynamic().__rf_coverage_layer?.remove()
 
+    val canvas = document.createElement("canvas") as HTMLCanvasElement
+    canvas.width = r.width
+    canvas.height = r.height
     val ctx = canvas.getContext("2d") as? CanvasRenderingContext2D ?: return
-    ctx.clearRect(0.0, 0.0, canvas.width.toDouble(), canvas.height.toDouble())
 
-    val step = max(1, min(r.width, r.height) / 150)
-    val totalRows = (r.height + step - 1) / step
+    val pixelSize = max(1, min(r.width, r.height) / 900)
+    val totalRows = r.height
     var processedRows = 0
-    for (yy in 0 until r.height step step) {
-        for (xx in 0 until r.width step step) {
+    for (yy in 0 until r.height) {
+        for (xx in 0 until r.width) {
             val lon = r.minLon + xx.toDouble() / (r.width - 1) * (r.maxLon - r.minLon)
             val lat = r.maxLat - yy.toDouble() / (r.height - 1) * (r.maxLat - r.minLat)
             val distKm = haversineKm(center.lat, center.lon, lat, lon)
@@ -490,18 +489,22 @@ private suspend fun drawCoverage(
 
             val needed = max(0.0, valueAt(r, lat, lon) - mastHeight)
             val (color, alpha) = colorFor(needed, thresholds)
-
-            val point = map.latLngToContainerPoint(arrayOf(lat, lon))
             ctx.fillStyle = color
             ctx.globalAlpha = alpha
-            ctx.fillRect((point.x as Number).toDouble(), (point.y as Number).toDouble(), 5.0, 5.0)
+            ctx.fillRect(xx.toDouble(), yy.toDouble(), pixelSize.toDouble(), pixelSize.toDouble())
         }
         processedRows += 1
         onProgress(((processedRows.toDouble() / totalRows) * 100.0).roundToInt().coerceIn(0, 100))
-        if (processedRows % 3 == 0) yield()
+        if (processedRows % 10 == 0) yield()
     }
     ctx.globalAlpha = 1.0
     onProgress(100)
+
+    val dataUrl = canvas.toDataURL("image/png")
+    val bounds = arrayOf(arrayOf(r.minLat, r.minLon), arrayOf(r.maxLat, r.maxLon))
+    val coverageLayer = js("L.imageOverlay(dataUrl, bounds, {opacity: 0.95, interactive: false, pane: 'overlayPane'})")
+    coverageLayer.addTo(map)
+    window.asDynamic().__rf_coverage_layer = coverageLayer
 }
 
 private fun haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
