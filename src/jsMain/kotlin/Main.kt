@@ -6,6 +6,7 @@ import kotlinx.browser.window
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.await
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import org.jetbrains.compose.web.attributes.InputType
 import org.jetbrains.compose.web.attributes.accept
 import org.jetbrains.compose.web.attributes.placeholder
@@ -27,6 +28,7 @@ external object L {
     fun tileLayer(urlTemplate: String, options: dynamic = definedExternally): dynamic
     fun rectangle(bounds: dynamic, options: dynamic = definedExternally): dynamic
     fun circleMarker(latlng: dynamic, options: dynamic = definedExternally): dynamic
+    fun circle(latlng: dynamic, options: dynamic = definedExternally): dynamic
     fun canvasOverlay(): dynamic
 }
 
@@ -53,8 +55,10 @@ fun App() {
     var radiusKm by remember { mutableStateOf(12.0) }
     var mastHeight by remember { mutableStateOf(30.0) }
     var isBusy by remember { mutableStateOf(false) }
+    var progressPercent by remember { mutableStateOf(0) }
     var statusMessage by remember { mutableStateOf("Очікування завантаження GeoTIFF.") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var mapClickBound by remember { mutableStateOf(false) }
 
     val thresholds = remember {
         mutableStateListOf(
@@ -86,8 +90,30 @@ fun App() {
             thresholds = thresholds,
             statusMessage = statusMessage,
             errorMessage = errorMessage,
+            isBusy = isBusy,
+            progressPercent = progressPercent,
             onRadiusChange = { radiusKm = it },
             onMastHeightChange = { mastHeight = it },
+            onRecalculate = {
+                val r = raster ?: return@SettingsPanel
+                val c = center ?: return@SettingsPanel
+                scope.launch {
+                    isBusy = true
+                    progressPercent = 0
+                    statusMessage = "Розрахунок зони покриття..."
+                    drawCoverage(
+                        r = r,
+                        center = c,
+                        radiusKm = radiusKm,
+                        mastHeight = mastHeight,
+                        thresholds = thresholds,
+                        onProgress = { progressPercent = it }
+                    )
+                    updateCenterMarker(c)
+                    statusMessage = "Розрахунок завершено."
+                    isBusy = false
+                }
+            },
             onThresholdChange = { index, limit, opacity ->
                 thresholds[index].limit = limit
                 thresholds[index].opacity = opacity
@@ -135,6 +161,27 @@ fun App() {
                     }
                 }) {
                     Text(statusMessage)
+                    if (progressPercent in 0..99) {
+                        Div({
+                            style {
+                                marginTop(8.px)
+                                width(100.percent)
+                                height(10.px)
+                                backgroundColor(rgb(232, 236, 240))
+                                borderRadius(8.px)
+                                overflow("hidden")
+                            }
+                        }) {
+                            Div({
+                                style {
+                                    width(progressPercent.percent)
+                                    height(100.percent)
+                                    backgroundColor(rgb(30, 116, 255))
+                                }
+                            })
+                        }
+                        Small { Text("${progressPercent}%") }
+                    }
                 }
             }
         }
@@ -147,25 +194,22 @@ fun App() {
         }
     }
 
-    LaunchedEffect(center, raster, radiusKm, mastHeight, thresholds.toList()) {
-        val r = raster ?: return@LaunchedEffect
+    LaunchedEffect(center, radiusKm) {
         val c = center ?: return@LaunchedEffect
-        isBusy = true
-        statusMessage = "Розрахунок зони покриття..."
-        drawCoverage(r, c, radiusKm, mastHeight, thresholds)
         updateCenterMarker(c)
-        statusMessage = "Розрахунок завершено."
-        isBusy = false
+        drawRadiusCircle(c, radiusKm)
     }
 
-    DisposableEffect(Unit) {
+    LaunchedEffect(mapReady, raster, mapClickBound) {
+        if (!mapReady || mapClickBound) return@LaunchedEffect
         setupMapClick { lat, lon ->
             val r = raster ?: return@setupMapClick
             if (lon in r.minLon..r.maxLon && lat in r.minLat..r.maxLat) {
                 center = LngLat(lon, lat)
+                statusMessage = "Центр обрано. Натисніть «Перерахувати»."
             }
         }
-        onDispose { }
+        mapClickBound = true
     }
 
     DisposableEffect(Unit) {
@@ -173,6 +217,7 @@ fun App() {
             if (!name.endsWith(".tif") && !name.endsWith(".tiff")) return@hookFileLoader
             scope.launch {
                 isBusy = true
+                progressPercent = 0
                 errorMessage = null
                 statusMessage = "Завантаження файлу $name..."
                 try {
@@ -202,8 +247,11 @@ private fun SettingsPanel(
     thresholds: List<Threshold>,
     statusMessage: String,
     errorMessage: String?,
+    isBusy: Boolean,
+    progressPercent: Int,
     onRadiusChange: (Double) -> Unit,
     onMastHeightChange: (Double) -> Unit,
+    onRecalculate: () -> Unit,
     onThresholdChange: (index: Int, limit: Double, opacity: Double) -> Unit,
 ) {
     Aside({
@@ -250,7 +298,21 @@ private fun SettingsPanel(
 
         Hr()
         H4 { Text("Центр") }
-        P { Text(center?.let { "lat=${it.lat.format(6)}, lon=${it.lon.format(6)}" } ?: "Натисніть в межах контуру") }
+        if (center != null) {
+            P { Text("lat=${center.lat.format(6)}") }
+            P { Text("lon=${center.lon.format(6)}") }
+            Button(attrs = {
+                onClick { onRecalculate() }
+                if (isBusy) disabled()
+            }) {
+                Text(if (isBusy) "Розрахунок..." else "Перерахувати")
+            }
+            if (isBusy) {
+                P { Text("Прогрес: $progressPercent%") }
+            }
+        } else {
+            P { Text("Натисніть в межах контуру") }
+        }
 
         H4 { Text("Параметри") }
         Label { Text("Радіус, км") }
@@ -337,7 +399,14 @@ private fun colorFor(heightNeed: Double, thresholds: List<Threshold>): Pair<Stri
     return t.color to t.opacity
 }
 
-private fun drawCoverage(r: RasterData, center: LngLat, radiusKm: Double, mastHeight: Double, thresholds: List<Threshold>) {
+private suspend fun drawCoverage(
+    r: RasterData,
+    center: LngLat,
+    radiusKm: Double,
+    mastHeight: Double,
+    thresholds: List<Threshold>,
+    onProgress: (Int) -> Unit
+) {
     val map = window.asDynamic().__rf_map
     if (map == undefined || map == null) return
 
@@ -358,6 +427,8 @@ private fun drawCoverage(r: RasterData, center: LngLat, radiusKm: Double, mastHe
     ctx.clearRect(0.0, 0.0, canvas.width.toDouble(), canvas.height.toDouble())
 
     val step = max(1, min(r.width, r.height) / 150)
+    val totalRows = (r.height + step - 1) / step
+    var processedRows = 0
     for (yy in 0 until r.height step step) {
         for (xx in 0 until r.width step step) {
             val lon = r.minLon + xx.toDouble() / (r.width - 1) * (r.maxLon - r.minLon)
@@ -373,8 +444,12 @@ private fun drawCoverage(r: RasterData, center: LngLat, radiusKm: Double, mastHe
             ctx.globalAlpha = alpha
             ctx.fillRect((point.x as Number).toDouble(), (point.y as Number).toDouble(), 5.0, 5.0)
         }
+        processedRows += 1
+        onProgress(((processedRows.toDouble() / totalRows) * 100.0).roundToInt().coerceIn(0, 100))
+        if (processedRows % 3 == 0) yield()
     }
     ctx.globalAlpha = 1.0
+    onProgress(100)
 }
 
 private fun haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
@@ -419,6 +494,17 @@ private fun updateCenterMarker(c: LngLat) {
     val marker = L.circleMarker(arrayOf(c.lat, c.lon), js("({radius: 7, color: '#000', fillColor:'#ffd400', fillOpacity:0.9})"))
     marker.addTo(map)
     window.asDynamic().__rf_center = marker
+}
+
+private fun drawRadiusCircle(c: LngLat, radiusKm: Double) {
+    val map = window.asDynamic().__rf_map ?: return
+    window.asDynamic().__rf_radius_circle?.remove()
+    val circle = L.circle(
+        arrayOf(c.lat, c.lon),
+        js("({ radius: ${radiusKm * 1000.0}, color: '#1e74ff', weight: 2, fill: false, dashArray: '8 6' })")
+    )
+    circle.addTo(map)
+    window.asDynamic().__rf_radius_circle = circle
 }
 
 private fun setupMapClick(onClick: (lat: Double, lon: Double) -> Unit) {
