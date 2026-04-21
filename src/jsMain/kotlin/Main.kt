@@ -62,7 +62,7 @@ fun App() {
 
     val thresholds = remember {
         mutableStateListOf(
-            Threshold(5.0, "#000000", 0.0, "≤ 5m (прозоро)"),
+            Threshold(5.0, "#9be37a", 0.28, "≤ 5m (світло-зелений)"),
             Threshold(50.0, "#00b050", 0.35, "≤ 50m (зелений)"),
             Threshold(200.0, "#1e74ff", 0.45, "≤ 200m (синій)"),
             Threshold(500.0, "#ff3b30", 0.55, "≤ 500m (червоний)"),
@@ -254,6 +254,38 @@ private fun SettingsPanel(
     onRecalculate: () -> Unit,
     onThresholdChange: (index: Int, limit: Double, opacity: Double) -> Unit,
 ) {
+    var radiusInput by remember(radiusKm) { mutableStateOf(radiusKm.toString()) }
+    var mastHeightInput by remember(mastHeight) { mutableStateOf(mastHeight.toString()) }
+    val thresholdLimitInputs = remember(thresholds.size) {
+        mutableStateListOf<String>().apply {
+            addAll(thresholds.map { it.limit.toString() })
+        }
+    }
+    val thresholdOpacityInputs = remember(thresholds.size) {
+        mutableStateListOf<String>().apply {
+            addAll(thresholds.map { it.opacity.toString() })
+        }
+    }
+
+    LaunchedEffect(radiusKm) {
+        val normalized = radiusKm.toString()
+        if (radiusInput != normalized) radiusInput = normalized
+    }
+    LaunchedEffect(mastHeight) {
+        val normalized = mastHeight.toString()
+        if (mastHeightInput != normalized) mastHeightInput = normalized
+    }
+    LaunchedEffect(thresholds.map { it.limit }, thresholds.map { it.opacity }) {
+        thresholds.forEachIndexed { index, threshold ->
+            if (thresholdLimitInputs.getOrNull(index) != threshold.limit.toString()) {
+                if (index < thresholdLimitInputs.size) thresholdLimitInputs[index] = threshold.limit.toString()
+            }
+            if (thresholdOpacityInputs.getOrNull(index) != threshold.opacity.toString()) {
+                if (index < thresholdOpacityInputs.size) thresholdOpacityInputs[index] = threshold.opacity.toString()
+            }
+        }
+    }
+
     Aside({
         style {
             width(330.px)
@@ -316,16 +348,24 @@ private fun SettingsPanel(
 
         H4 { Text("Параметри") }
         Label { Text("Радіус, км") }
-        Input(InputType.Number) {
-            value(radiusKm.toString())
-            onInput { event -> onRadiusChange(event.inputValueOrNull() ?: radiusKm) }
+        Input(InputType.Text) {
+            value(radiusInput)
+            onInput { event ->
+                val target = event.target as? HTMLInputElement ?: return@onInput
+                radiusInput = target.value
+                target.value.toDoubleOrNull()?.let(onRadiusChange)
+            }
         }
 
         Br(); Br()
         Label { Text("Висота обладнання (центр), м") }
-        Input(InputType.Number) {
-            value(mastHeight.toString())
-            onInput { event -> onMastHeightChange(event.inputValueOrNull() ?: mastHeight) }
+        Input(InputType.Text) {
+            value(mastHeightInput)
+            onInput { event ->
+                val target = event.target as? HTMLInputElement ?: return@onInput
+                mastHeightInput = target.value
+                target.value.toDoubleOrNull()?.let(onMastHeightChange)
+            }
         }
 
         Hr()
@@ -333,13 +373,25 @@ private fun SettingsPanel(
         thresholds.forEachIndexed { idx, t ->
             Div({ style { marginBottom(10.px) } }) {
                 Small { Text(t.label) }
-                Input(InputType.Number) {
-                    value(t.limit.toString())
-                    onInput { event -> onThresholdChange(idx, event.inputValueOrNull() ?: t.limit, t.opacity) }
+                Input(InputType.Text) {
+                    value(thresholdLimitInputs.getOrNull(idx) ?: t.limit.toString())
+                    onInput { event ->
+                        val target = event.target as? HTMLInputElement ?: return@onInput
+                        thresholdLimitInputs[idx] = target.value
+                        target.value.toDoubleOrNull()?.let { parsed ->
+                            onThresholdChange(idx, parsed, t.opacity)
+                        }
+                    }
                 }
-                Input(InputType.Number) {
-                    value(t.opacity.toString())
-                    onInput { event -> onThresholdChange(idx, t.limit, event.inputValueOrNull() ?: t.opacity) }
+                Input(InputType.Text) {
+                    value(thresholdOpacityInputs.getOrNull(idx) ?: t.opacity.toString())
+                    onInput { event ->
+                        val target = event.target as? HTMLInputElement ?: return@onInput
+                        thresholdOpacityInputs[idx] = target.value
+                        target.value.toDoubleOrNull()?.let { parsed ->
+                            onThresholdChange(idx, t.limit, parsed.coerceIn(0.0, 1.0))
+                        }
+                    }
                     placeholder("opacity 0..1")
                 }
                 Div({
