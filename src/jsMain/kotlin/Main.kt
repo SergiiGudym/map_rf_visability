@@ -3,6 +3,8 @@
 import androidx.compose.runtime.*
 import kotlinx.browser.document
 import kotlinx.browser.window
+import kotlinx.coroutines.await
+import kotlinx.coroutines.launch
 import org.jetbrains.compose.web.attributes.InputType
 import org.jetbrains.compose.web.attributes.accept
 import org.jetbrains.compose.web.attributes.placeholder
@@ -42,6 +44,7 @@ private data class LngLat(val lon: Double, val lat: Double)
 
 @Composable
 fun App() {
+    val scope = rememberCoroutineScope()
     var mapReady by remember { mutableStateOf(false) }
     var raster by remember { mutableStateOf<RasterData?>(null) }
     var center by remember { mutableStateOf<LngLat?>(null) }
@@ -140,7 +143,9 @@ fun App() {
     DisposableEffect(Unit) {
         hookFileLoader { name, bytes ->
             if (!name.endsWith(".tif") && !name.endsWith(".tiff")) return@hookFileLoader
-            raster = parseGeoTiff(bytes)
+            scope.launch {
+                raster = parseGeoTiff(bytes)
+            }
         }
         onDispose { }
     }
@@ -229,8 +234,8 @@ private fun SettingsPanel(
     }
 }
 
-private fun parseGeoTiff(bytes: dynamic): RasterData {
-    val tiff = GeoTIFF.fromArrayBuffer(bytes)
+private suspend fun parseGeoTiff(bytes: dynamic): RasterData {
+    val tiff = GeoTIFF.fromArrayBuffer(bytes).await()
     val image = tiff.getImage(0)
     val width = image.getWidth() as Int
     val height = image.getHeight() as Int
