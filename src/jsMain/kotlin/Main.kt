@@ -354,7 +354,7 @@ private fun SettingsPanel(
 
         Hr()
         H4 { Text("Легенда/схема") }
-        P { Text("Дельта висот: зелений → синій → червоний → чорний, прозорість 90%.") }
+        P { Text("Дельта висот: зелений → синій → червоний, вища дельта = більш насичений шар.") }
     }
 }
 
@@ -428,7 +428,6 @@ private suspend fun drawCoverage(
     )
     saveCachedRastersNearSource(fileName, recalculationCache[cacheKey]!!)
 
-    val pixelSize = max(1, min(r.width, r.height) / 900)
     val totalRows = r.height
     var processedRows = 0
     for (yy in 0 until r.height) {
@@ -440,7 +439,7 @@ private suspend fun drawCoverage(
             val (color, alpha) = gradientColorForDelta(delta, result.maxDelta)
             ctx.fillStyle = color
             ctx.globalAlpha = alpha
-            ctx.fillRect(xx.toDouble(), yy.toDouble(), pixelSize.toDouble(), pixelSize.toDouble())
+            ctx.fillRect(xx.toDouble(), yy.toDouble(), 1.0, 1.0)
         }
         processedRows += 1
         onProgress(50 + ((processedRows.toDouble() / totalRows) * 50.0).roundToInt().coerceIn(0, 50))
@@ -472,51 +471,62 @@ private fun buildVisibilityRasters(
     val visible = r.values.copyOf()
     val delta = FloatArray(r.values.size)
     val mask = BooleanArray(r.values.size)
+    val maxAllowedHeight = 1500.0
 
-    for (ring in 0..radiusPx) {
-        val progress = ((ring.toDouble() / radiusPx) * 50.0).roundToInt().coerceIn(0, 50)
-        onProgress(progress)
-        val ringSqFrom = max(0, ring - 1).toDouble().pow(2)
-        val ringSqTo = ring.toDouble().pow(2)
-        for (dy in -ring..ring) {
-            for (dx in -ring..ring) {
-                val sq = (dx * dx + dy * dy).toDouble()
-                if (sq > ringSqTo || sq <= ringSqFrom) continue
-                val x = centerX + dx
-                val y = centerY + dy
-                if (x !in 0 until r.width || y !in 0 until r.height) continue
-                val index = y * r.width + x
-                val lon = r.minLon + x.toDouble() / (r.width - 1) * (r.maxLon - r.minLon)
-                val lat = r.maxLat - y.toDouble() / (r.height - 1) * (r.maxLat - r.minLat)
-                if (haversineKm(center.lat, center.lon, lat, lon) > radiusKm) continue
-                mask[index] = true
-                val base = min(1500.0, r.values[index].toDouble())
-                if (ring <= 1) {
-                    visible[index] = base.toFloat()
-                    continue
-                }
-                val angle = atan2(dy.toDouble(), dx.toDouble())
-                val prevX = (centerX + cos(angle) * (ring - 1)).roundToInt().coerceIn(0, r.width - 1)
-                val prevY = (centerY + sin(angle) * (ring - 1)).roundToInt().coerceIn(0, r.height - 1)
-                val prevIndex = prevY * r.width + prevX
-                val prevVisible = min(1500.0, visible[prevIndex].toDouble())
-                val updated = if (prevVisible >= 1500.0) {
-                    1500.0
-                } else {
-                    val minVisibleAtPoint = centerHeight + (prevVisible - centerHeight) * (ring.toDouble() / (ring - 1).toDouble())
-                    max(base, minVisibleAtPoint)
-                }
-                visible[index] = min(1500.0, updated).toFloat()
+    val minX = max(0, centerX - radiusPx)
+    val maxX = min(r.width - 1, centerX + radiusPx)
+    val minY = max(0, centerY - radiusPx)
+    val maxY = min(r.height - 1, centerY + radiusPx)
+    val totalRows = max(1, maxY - minY + 1)
+    var processedRows = 0
+
+    for (y in minY..maxY) {
+        for (x in minX..maxX) {
+            val dx = x - centerX
+            val dy = y - centerY
+            val distPx = sqrt((dx * dx + dy * dy).toDouble())
+            if (distPx > radiusPx) continue
+            val index = y * r.width + x
+            val lon = r.minLon + x.toDouble() / (r.width - 1) * (r.maxLon - r.minLon)
+            val lat = r.maxLat - y.toDouble() / (r.height - 1) * (r.maxLat - r.minLat)
+            if (haversineKm(center.lat, center.lon, lat, lon) > radiusKm) continue
+
+            mask[index] = true
+            val targetHeight = min(maxAllowedHeight, r.values[index].toDouble())
+            if (distPx < 1.0) {
+                visible[index] = targetHeight.toFloat()
+                continue
             }
+
+            var maxBlockingSlope = Double.NEGATIVE_INFINITY
+            val steps = max(1, floor(distPx).toInt())
+            for (step in 1 until steps) {
+                val t = step.toDouble() / distPx
+                val sampleX = centerX + dx * t
+                val sampleY = centerY + dy * t
+                val terrain = min(maxAllowedHeight, bilinearSample(r, sampleX, sampleY))
+                val slope = (terrain - centerHeight) / step.toDouble()
+                if (slope > maxBlockingSlope) maxBlockingSlope = slope
+            }
+
+            val minVisibleHeight = if (maxBlockingSlope == Double.NEGATIVE_INFINITY) {
+                targetHeight
+            } else {
+                centerHeight + maxBlockingSlope * distPx
+            }
+            visible[index] = max(targetHeight, min(minVisibleHeight, maxAllowedHeight)).toFloat()
         }
+        processedRows += 1
+        val progress = ((processedRows.toDouble() / totalRows) * 50.0).roundToInt().coerceIn(0, 50)
+        onProgress(progress)
     }
 
     var maxDelta = 0.0
     for (i in visible.indices) {
         if (!mask[i]) continue
-        val original = min(1500.0, r.values[i].toDouble())
-        val adjusted = min(1500.0, visible[i].toDouble())
-        val d = if (adjusted >= 1500.0) 0.0 else max(0.0, adjusted - original)
+        val original = min(maxAllowedHeight, r.values[i].toDouble())
+        val adjusted = min(maxAllowedHeight, visible[i].toDouble())
+        val d = max(0.0, adjusted - original)
         delta[i] = d.toFloat()
         if (d > maxDelta) maxDelta = d
     }
@@ -524,15 +534,31 @@ private fun buildVisibilityRasters(
 }
 
 private fun gradientColorForDelta(delta: Double, maxDelta: Double): Pair<String, Double> {
-    if (maxDelta <= 0.0) return "#00ff00" to 0.1
+    if (maxDelta <= 0.0) return "#2ecc71" to 0.45
     val t = (delta / maxDelta).coerceIn(0.0, 1.0)
     val (r, g, b) = when {
-        t < 1.0 / 3.0 -> lerpColor(0x00, 0x00, 0x00, 0x00, 0xff, 0xff, t * 3.0) // green -> blue
-        t < 2.0 / 3.0 -> lerpColor(0x00, 0xff, 0x00, 0xff, 0x00, 0x00, (t - 1.0 / 3.0) * 3.0) // blue -> red
-        else -> lerpColor(0xff, 0x00, 0x00, 0x00, 0x00, 0x00, (t - 2.0 / 3.0) * 3.0) // red -> black
+        t < 0.5 -> lerpColor(0x2e, 0xcc, 0x71, 0x34, 0x98, 0xdb, t * 2.0) // green -> blue
+        else -> lerpColor(0x34, 0x98, 0xdb, 0xe7, 0x4c, 0x3c, (t - 0.5) * 2.0) // blue -> red
     }
     val color = "#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}"
-    return color to 0.1
+    val alpha = 0.35 + 0.5 * t
+    return color to alpha
+}
+
+private fun bilinearSample(r: RasterData, x: Double, y: Double): Double {
+    val x0 = floor(x).toInt().coerceIn(0, r.width - 1)
+    val y0 = floor(y).toInt().coerceIn(0, r.height - 1)
+    val x1 = (x0 + 1).coerceIn(0, r.width - 1)
+    val y1 = (y0 + 1).coerceIn(0, r.height - 1)
+    val tx = x - x0
+    val ty = y - y0
+    val q11 = r.values[y0 * r.width + x0].toDouble()
+    val q21 = r.values[y0 * r.width + x1].toDouble()
+    val q12 = r.values[y1 * r.width + x0].toDouble()
+    val q22 = r.values[y1 * r.width + x1].toDouble()
+    val top = q11 * (1 - tx) + q21 * tx
+    val bottom = q12 * (1 - tx) + q22 * tx
+    return top * (1 - ty) + bottom * ty
 }
 
 private fun lerpColor(r1: Int, g1: Int, b1: Int, r2: Int, g2: Int, b2: Int, t: Double): Triple<Int, Int, Int> {
@@ -550,21 +576,29 @@ private fun buildCacheKey(fileName: String, center: LngLat, radiusKm: Double, ma
 private fun encodeGeoTiffOrNull(r: RasterData, values: FloatArray): ByteArray? {
     val writeFunction = GeoTIFF.asDynamic().writeArrayBuffer
     if (jsTypeOf(writeFunction) != "function") return null
-    val options = js("({})")
-    options.width = r.width
-    options.height = r.height
-    options.bitsPerSample = arrayOf(32)
-    options.sampleFormat = arrayOf(3)
-    options.geoKeyDirectory = js("({ GTModelTypeGeoKey: 2, GTRasterTypeGeoKey: 1 })")
-    options.tiePoints = arrayOf(0, 0, 0, r.minLon, r.maxLat, 0)
-    options.pixelScale = arrayOf(
-        (r.maxLon - r.minLon) / (r.width - 1).toDouble(),
-        (r.maxLat - r.minLat) / (r.height - 1).toDouble(),
+
+    val metadata = js("({})")
+    metadata.width = r.width
+    metadata.height = r.height
+    metadata.ImageWidth = r.width
+    metadata.ImageLength = r.height
+    metadata.BitsPerSample = arrayOf(32)
+    metadata.SampleFormat = arrayOf(3) // floating point
+    metadata.SamplesPerPixel = 1
+    metadata.Compression = 1 // no compression
+    metadata.PhotometricInterpretation = 1 // BlackIsZero
+    metadata.GeoKeyDirectory = js("({ GTModelTypeGeoKey: 2, GTRasterTypeGeoKey: 1 })")
+    metadata.ModelTiepoint = arrayOf(0, 0, 0, r.minLon, r.maxLat, 0)
+    metadata.ModelPixelScale = arrayOf(
+        (r.maxLon - r.minLon) / max(1, r.width - 1).toDouble(),
+        (r.maxLat - r.minLat) / max(1, r.height - 1).toDouble(),
         0
     )
+
     val floatArray = js("new Float32Array(values.length)")
     for (i in values.indices) floatArray[i] = values[i]
-    val buffer = writeFunction(arrayOf(floatArray), options)
+
+    val buffer = writeFunction(floatArray, metadata)
     val uint8 = js("new Uint8Array(buffer)")
     val output = ByteArray(uint8.length as Int)
     for (i in output.indices) output[i] = (uint8[i] as Number).toInt().toByte()
@@ -579,7 +613,7 @@ private fun saveCachedRastersNearSource(fileName: String, cached: CachedRasters)
 private fun saveBlob(name: String, bytes: ByteArray?) {
     if (bytes == null) return
     val blob = js("new Blob([bytes], {type:'image/tiff'})")
-    val url = window.URL.createObjectURL(blob)
+    val url = window.asDynamic().URL.createObjectURL(blob)
     val a = document.createElement("a") as HTMLAnchorElement
     a.href = url
     a.download = name
@@ -587,7 +621,7 @@ private fun saveBlob(name: String, bytes: ByteArray?) {
     document.body?.appendChild(a)
     a.click()
     a.remove()
-    window.URL.revokeObjectURL(url)
+    window.asDynamic().URL.revokeObjectURL(url)
 }
 
 private fun haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
