@@ -9,12 +9,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 import org.jetbrains.compose.web.attributes.InputType
 import org.jetbrains.compose.web.attributes.accept
-import org.jetbrains.compose.web.attributes.placeholder
 import org.jetbrains.compose.web.css.*
 import org.jetbrains.compose.web.dom.*
 import org.jetbrains.compose.web.renderComposable
 import org.w3c.dom.CanvasRenderingContext2D
 import org.w3c.dom.HTMLCanvasElement
+import org.w3c.dom.HTMLAnchorElement
 import org.w3c.dom.HTMLInputElement
 import kotlin.js.Promise
 import kotlin.math.*
@@ -42,9 +42,20 @@ private data class RasterData(
     val maxLat: Double
 )
 
-private data class Threshold(var limit: Double, var color: String, var opacity: Double, val label: String)
-
 private data class LngLat(val lon: Double, val lat: Double)
+
+private data class RecalcResult(
+    val visibleHeights: FloatArray,
+    val deltaHeights: FloatArray,
+    val radiusMask: BooleanArray,
+    val maxDelta: Double
+)
+
+private data class CachedRasters(
+    val key: String,
+    val visibleTif: ByteArray?,
+    val deltaTif: ByteArray?
+)
 
 @Composable
 fun App() {
@@ -54,22 +65,13 @@ fun App() {
     var center by remember { mutableStateOf<LngLat?>(null) }
     var radiusKm by remember { mutableStateOf(12.0) }
     var mastHeight by remember { mutableStateOf(30.0) }
+    var loadedFileName by remember { mutableStateOf("output_hh.tif") }
     var isBusy by remember { mutableStateOf(false) }
     var progressPercent by remember { mutableStateOf(0) }
     var statusMessage by remember { mutableStateOf("Очікування завантаження GeoTIFF.") }
     var calcDurationSec by remember { mutableStateOf<Double?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var mapClickBound by remember { mutableStateOf(false) }
-
-    val thresholds = remember {
-        mutableStateListOf(
-            Threshold(5.0, "#9be37a", 0.28, "≤ 5m (світло-зелений)"),
-            Threshold(50.0, "#00b050", 0.35, "≤ 50m (зелений)"),
-            Threshold(200.0, "#1e74ff", 0.45, "≤ 200m (синій)"),
-            Threshold(500.0, "#ff3b30", 0.55, "≤ 500m (червоний)"),
-            Threshold(1500.0, "#000000", 0.70, "1500m+ (чорний)"),
-        )
-    }
 
     LaunchedEffect(Unit) {
         initMap { mapReady = true }
@@ -88,7 +90,6 @@ fun App() {
             center = center,
             radiusKm = radiusKm,
             mastHeight = mastHeight,
-            thresholds = thresholds,
             statusMessage = statusMessage,
             errorMessage = errorMessage,
             isBusy = isBusy,
@@ -110,7 +111,7 @@ fun App() {
                         center = c,
                         radiusKm = radiusKm,
                         mastHeight = mastHeight,
-                        thresholds = thresholds,
+                        fileName = loadedFileName,
                         onProgress = { progressPercent = it }
                     )
                     calcDurationSec = ((window.performance.now() - startedAt) / 1000.0)
@@ -118,10 +119,6 @@ fun App() {
                     statusMessage = "Розрахунок завершено за ${calcDurationSec?.format(2) ?: "?"} с."
                     isBusy = false
                 }
-            },
-            onThresholdChange = { index, limit, opacity ->
-                thresholds[index].limit = limit
-                thresholds[index].opacity = opacity
             },
         )
 
@@ -224,6 +221,7 @@ fun App() {
                 isBusy = true
                 progressPercent = 0
                 errorMessage = null
+                loadedFileName = name
                 statusMessage = "Завантаження файлу $name..."
                 try {
                     statusMessage = "Парсинг GeoTIFF..."
@@ -249,7 +247,6 @@ private fun SettingsPanel(
     center: LngLat?,
     radiusKm: Double,
     mastHeight: Double,
-    thresholds: List<Threshold>,
     statusMessage: String,
     errorMessage: String?,
     isBusy: Boolean,
@@ -258,20 +255,9 @@ private fun SettingsPanel(
     onRadiusChange: (Double) -> Unit,
     onMastHeightChange: (Double) -> Unit,
     onRecalculate: () -> Unit,
-    onThresholdChange: (index: Int, limit: Double, opacity: Double) -> Unit,
 ) {
     var radiusInput by remember(radiusKm) { mutableStateOf(radiusKm.toString()) }
     var mastHeightInput by remember(mastHeight) { mutableStateOf(mastHeight.toString()) }
-    val thresholdLimitInputs = remember(thresholds.size) {
-        mutableStateListOf<String>().apply {
-            addAll(thresholds.map { it.limit.toString() })
-        }
-    }
-    val thresholdOpacityInputs = remember(thresholds.size) {
-        mutableStateListOf<String>().apply {
-            addAll(thresholds.map { it.opacity.toString() })
-        }
-    }
 
     LaunchedEffect(radiusKm) {
         val normalized = radiusKm.toString()
@@ -280,16 +266,6 @@ private fun SettingsPanel(
     LaunchedEffect(mastHeight) {
         val normalized = mastHeight.toString()
         if (mastHeightInput != normalized) mastHeightInput = normalized
-    }
-    LaunchedEffect(thresholds.map { it.limit }, thresholds.map { it.opacity }) {
-        thresholds.forEachIndexed { index, threshold ->
-            if (thresholdLimitInputs.getOrNull(index) != threshold.limit.toString()) {
-                if (index < thresholdLimitInputs.size) thresholdLimitInputs[index] = threshold.limit.toString()
-            }
-            if (thresholdOpacityInputs.getOrNull(index) != threshold.opacity.toString()) {
-                if (index < thresholdOpacityInputs.size) thresholdOpacityInputs[index] = threshold.opacity.toString()
-            }
-        }
     }
 
     Aside({
@@ -378,40 +354,7 @@ private fun SettingsPanel(
 
         Hr()
         H4 { Text("Легенда/схема") }
-        thresholds.forEachIndexed { idx, t ->
-            Div({ style { marginBottom(10.px) } }) {
-                Small { Text(t.label) }
-                Input(InputType.Text) {
-                    value(thresholdLimitInputs.getOrNull(idx) ?: t.limit.toString())
-                    onInput { event ->
-                        val target = event.target as? HTMLInputElement ?: return@onInput
-                        thresholdLimitInputs[idx] = target.value
-                        target.value.toDoubleOrNull()?.let { parsed ->
-                            onThresholdChange(idx, parsed, t.opacity)
-                        }
-                    }
-                }
-                Input(InputType.Text) {
-                    value(thresholdOpacityInputs.getOrNull(idx) ?: t.opacity.toString())
-                    onInput { event ->
-                        val target = event.target as? HTMLInputElement ?: return@onInput
-                        thresholdOpacityInputs[idx] = target.value
-                        target.value.toDoubleOrNull()?.let { parsed ->
-                            onThresholdChange(idx, t.limit, parsed.coerceIn(0.0, 1.0))
-                        }
-                    }
-                    placeholder("opacity 0..1")
-                }
-                Div({
-                    style {
-                        width(100.percent)
-                        height(10.px)
-                        backgroundColor(Color(t.color))
-                        opacity(t.opacity)
-                    }
-                })
-            }
-        }
+        P { Text("Дельта висот: зелений → синій → червоний → чорний, прозорість 90%.") }
     }
 }
 
@@ -453,18 +396,14 @@ private fun valueAt(r: RasterData, lat: Double, lon: Double): Double {
     return r.values[y * r.width + x].toDouble()
 }
 
-private fun colorFor(heightNeed: Double, thresholds: List<Threshold>): Pair<String, Double> {
-    val sorted = thresholds.sortedBy { it.limit }
-    val t = sorted.firstOrNull { heightNeed <= it.limit } ?: sorted.last()
-    return t.color to t.opacity
-}
+private val recalculationCache = mutableMapOf<String, CachedRasters>()
 
 private suspend fun drawCoverage(
     r: RasterData,
     center: LngLat,
     radiusKm: Double,
     mastHeight: Double,
-    thresholds: List<Threshold>,
+    fileName: String,
     onProgress: (Int) -> Unit
 ) {
     val map = window.asDynamic().__rf_map
@@ -477,24 +416,34 @@ private suspend fun drawCoverage(
     canvas.height = r.height
     val ctx = canvas.getContext("2d") as? CanvasRenderingContext2D ?: return
 
+    val cacheKey = buildCacheKey(fileName, center, radiusKm, mastHeight)
+    val result = buildVisibilityRasters(r, center, radiusKm, mastHeight, onProgress)
+
+    val visibleTif = encodeGeoTiffOrNull(r, result.visibleHeights)
+    val deltaTif = encodeGeoTiffOrNull(r, result.deltaHeights)
+    recalculationCache[cacheKey] = CachedRasters(
+        key = cacheKey,
+        visibleTif = visibleTif,
+        deltaTif = deltaTif
+    )
+    saveCachedRastersNearSource(fileName, recalculationCache[cacheKey]!!)
+
     val pixelSize = max(1, min(r.width, r.height) / 900)
     val totalRows = r.height
     var processedRows = 0
     for (yy in 0 until r.height) {
         for (xx in 0 until r.width) {
-            val lon = r.minLon + xx.toDouble() / (r.width - 1) * (r.maxLon - r.minLon)
-            val lat = r.maxLat - yy.toDouble() / (r.height - 1) * (r.maxLat - r.minLat)
-            val distKm = haversineKm(center.lat, center.lon, lat, lon)
-            if (distKm > radiusKm) continue
-
-            val needed = max(0.0, valueAt(r, lat, lon) - mastHeight)
-            val (color, alpha) = colorFor(needed, thresholds)
+            val index = yy * r.width + xx
+            if (!result.radiusMask[index]) continue
+            val delta = result.deltaHeights[index].toDouble()
+            if (delta <= 0.0) continue
+            val (color, alpha) = gradientColorForDelta(delta, result.maxDelta)
             ctx.fillStyle = color
             ctx.globalAlpha = alpha
             ctx.fillRect(xx.toDouble(), yy.toDouble(), pixelSize.toDouble(), pixelSize.toDouble())
         }
         processedRows += 1
-        onProgress(((processedRows.toDouble() / totalRows) * 100.0).roundToInt().coerceIn(0, 100))
+        onProgress(50 + ((processedRows.toDouble() / totalRows) * 50.0).roundToInt().coerceIn(0, 50))
         if (processedRows % 10 == 0) yield()
     }
     ctx.globalAlpha = 1.0
@@ -505,6 +454,140 @@ private suspend fun drawCoverage(
     val coverageLayer = js("L.imageOverlay(dataUrl, bounds, {opacity: 0.95, interactive: false, pane: 'overlayPane'})")
     coverageLayer.addTo(map)
     window.asDynamic().__rf_coverage_layer = coverageLayer
+}
+
+private fun buildVisibilityRasters(
+    r: RasterData,
+    center: LngLat,
+    radiusKm: Double,
+    mastHeight: Double,
+    onProgress: (Int) -> Unit
+): RecalcResult {
+    val centerX = ((center.lon - r.minLon) / (r.maxLon - r.minLon) * (r.width - 1)).roundToInt().coerceIn(0, r.width - 1)
+    val centerY = ((r.maxLat - center.lat) / (r.maxLat - r.minLat) * (r.height - 1)).roundToInt().coerceIn(0, r.height - 1)
+    val centerHeight = r.values[centerY * r.width + centerX].toDouble() + mastHeight
+    val kmPerPixel = haversineKm(center.lat, center.lon, center.lat, center.lon + (r.maxLon - r.minLon) / max(2, r.width))
+        .coerceAtLeast(0.001)
+    val radiusPx = max(1, (radiusKm / kmPerPixel).roundToInt())
+    val visible = r.values.copyOf()
+    val delta = FloatArray(r.values.size)
+    val mask = BooleanArray(r.values.size)
+
+    for (ring in 0..radiusPx) {
+        val progress = ((ring.toDouble() / radiusPx) * 50.0).roundToInt().coerceIn(0, 50)
+        onProgress(progress)
+        val ringSqFrom = max(0, ring - 1).toDouble().pow(2)
+        val ringSqTo = ring.toDouble().pow(2)
+        for (dy in -ring..ring) {
+            for (dx in -ring..ring) {
+                val sq = (dx * dx + dy * dy).toDouble()
+                if (sq > ringSqTo || sq <= ringSqFrom) continue
+                val x = centerX + dx
+                val y = centerY + dy
+                if (x !in 0 until r.width || y !in 0 until r.height) continue
+                val index = y * r.width + x
+                val lon = r.minLon + x.toDouble() / (r.width - 1) * (r.maxLon - r.minLon)
+                val lat = r.maxLat - y.toDouble() / (r.height - 1) * (r.maxLat - r.minLat)
+                if (haversineKm(center.lat, center.lon, lat, lon) > radiusKm) continue
+                mask[index] = true
+                val base = min(1500.0, r.values[index].toDouble())
+                if (ring <= 1) {
+                    visible[index] = base.toFloat()
+                    continue
+                }
+                val angle = atan2(dy.toDouble(), dx.toDouble())
+                val prevX = (centerX + cos(angle) * (ring - 1)).roundToInt().coerceIn(0, r.width - 1)
+                val prevY = (centerY + sin(angle) * (ring - 1)).roundToInt().coerceIn(0, r.height - 1)
+                val prevIndex = prevY * r.width + prevX
+                val prevVisible = min(1500.0, visible[prevIndex].toDouble())
+                val updated = if (prevVisible >= 1500.0) {
+                    1500.0
+                } else {
+                    val minVisibleAtPoint = centerHeight + (prevVisible - centerHeight) * (ring.toDouble() / (ring - 1).toDouble())
+                    max(base, minVisibleAtPoint)
+                }
+                visible[index] = min(1500.0, updated).toFloat()
+            }
+        }
+    }
+
+    var maxDelta = 0.0
+    for (i in visible.indices) {
+        if (!mask[i]) continue
+        val original = min(1500.0, r.values[i].toDouble())
+        val adjusted = min(1500.0, visible[i].toDouble())
+        val d = if (adjusted >= 1500.0) 0.0 else max(0.0, adjusted - original)
+        delta[i] = d.toFloat()
+        if (d > maxDelta) maxDelta = d
+    }
+    return RecalcResult(visible, delta, mask, maxDelta)
+}
+
+private fun gradientColorForDelta(delta: Double, maxDelta: Double): Pair<String, Double> {
+    if (maxDelta <= 0.0) return "#00ff00" to 0.1
+    val t = (delta / maxDelta).coerceIn(0.0, 1.0)
+    val (r, g, b) = when {
+        t < 1.0 / 3.0 -> lerpColor(0x00, 0x00, 0x00, 0x00, 0xff, 0xff, t * 3.0) // green -> blue
+        t < 2.0 / 3.0 -> lerpColor(0x00, 0xff, 0x00, 0xff, 0x00, 0x00, (t - 1.0 / 3.0) * 3.0) // blue -> red
+        else -> lerpColor(0xff, 0x00, 0x00, 0x00, 0x00, 0x00, (t - 2.0 / 3.0) * 3.0) // red -> black
+    }
+    val color = "#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}"
+    return color to 0.1
+}
+
+private fun lerpColor(r1: Int, g1: Int, b1: Int, r2: Int, g2: Int, b2: Int, t: Double): Triple<Int, Int, Int> {
+    val clamped = t.coerceIn(0.0, 1.0)
+    return Triple(
+        (r1 + (r2 - r1) * clamped).roundToInt().coerceIn(0, 255),
+        (g1 + (g2 - g1) * clamped).roundToInt().coerceIn(0, 255),
+        (b1 + (b2 - b1) * clamped).roundToInt().coerceIn(0, 255),
+    )
+}
+
+private fun buildCacheKey(fileName: String, center: LngLat, radiusKm: Double, mastHeight: Double): String =
+    "${fileName.lowercase()}::${center.lat.format(6)}::${center.lon.format(6)}::${radiusKm.format(3)}::${mastHeight.format(3)}"
+
+private fun encodeGeoTiffOrNull(r: RasterData, values: FloatArray): ByteArray? {
+    val writeFunction = GeoTIFF.asDynamic().writeArrayBuffer
+    if (jsTypeOf(writeFunction) != "function") return null
+    val options = js("({})")
+    options.width = r.width
+    options.height = r.height
+    options.bitsPerSample = arrayOf(32)
+    options.sampleFormat = arrayOf(3)
+    options.geoKeyDirectory = js("({ GTModelTypeGeoKey: 2, GTRasterTypeGeoKey: 1 })")
+    options.tiePoints = arrayOf(0, 0, 0, r.minLon, r.maxLat, 0)
+    options.pixelScale = arrayOf(
+        (r.maxLon - r.minLon) / (r.width - 1).toDouble(),
+        (r.maxLat - r.minLat) / (r.height - 1).toDouble(),
+        0
+    )
+    val floatArray = js("new Float32Array(values.length)")
+    for (i in values.indices) floatArray[i] = values[i]
+    val buffer = writeFunction(arrayOf(floatArray), options)
+    val uint8 = js("new Uint8Array(buffer)")
+    val output = ByteArray(uint8.length as Int)
+    for (i in output.indices) output[i] = (uint8[i] as Number).toInt().toByte()
+    return output
+}
+
+private fun saveCachedRastersNearSource(fileName: String, cached: CachedRasters) {
+    saveBlob("${fileName.substringBeforeLast('.')}_visible.tif", cached.visibleTif)
+    saveBlob("${fileName.substringBeforeLast('.')}_delta.tif", cached.deltaTif)
+}
+
+private fun saveBlob(name: String, bytes: ByteArray?) {
+    if (bytes == null) return
+    val blob = js("new Blob([bytes], {type:'image/tiff'})")
+    val url = window.URL.createObjectURL(blob)
+    val a = document.createElement("a") as HTMLAnchorElement
+    a.href = url
+    a.download = name
+    a.style.display = "none"
+    document.body?.appendChild(a)
+    a.click()
+    a.remove()
+    window.URL.revokeObjectURL(url)
 }
 
 private fun haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
@@ -588,9 +671,6 @@ private fun hookFileLoader(onLoaded: (name: String, bytes: dynamic) -> Unit) {
 private fun Double.format(digits: Int): String = unsafeCast<dynamic>().toFixed(digits) as String
 
 private fun Double.toRadians(): Double = this * PI / 180.0
-
-private fun Any.inputValueOrNull(): Double? =
-    (unsafeCast<dynamic>().target as? HTMLInputElement)?.value?.toDoubleOrNull()
 
 fun main() {
     renderComposable(rootElementId = "root") {
